@@ -72,23 +72,44 @@ data "vcd_ip_space" "internet-space" {
 
 #Start network NSX
 #Private IP Space
-resource "vcd_ip_space" "local-space" {
-  name        = "terraform-local-space"
+// https://registry.terraform.io/providers/vmware/vcd/latest/docs/resources/ip_space
+resource "vcd_ip_space" "local-space-dev" {
+  name        = "terraform-local-dev"
   description = "Private IP Spaces are dedicated to a single tenant"
   type        = "PRIVATE"
   org_id      = data.vcd_org.org.id
 
-  internal_scope = ["192.168.100.0/24", "192.168.200.0/24"]
+  internal_scope = ["192.168.0.0/16", "10.0.0.0/16"] // max 5
 
   route_advertisement_enabled = false
 
   ip_prefix {
     default_quota = -1 # unlimited
-
+    // Example: Allow allocated 20 prefix in scope 192
+    prefix {
+      first_ip      = "192.168.0.0"
+      prefix_length = 24
+      prefix_count  = 10
+    }
     prefix {
       first_ip      = "192.168.100.0"
       prefix_length = 24
-      prefix_count  = 1
+      prefix_count  = 10
+    }
+  }
+
+  ip_prefix {
+    default_quota = -1 # unlimited
+    // Example: Allow allocated 8 prefix in scope 10
+    prefix {
+      first_ip      = "10.0.0.0"
+      prefix_length = 30
+      prefix_count  = 4
+    }
+    prefix {
+      first_ip      = "10.0.1.0"
+      prefix_length = 30
+      prefix_count  = 4
     }
   }
 }
@@ -97,14 +118,26 @@ resource "vcd_ip_space" "local-space" {
 #It supports both - Floating IPs (IPs from IP Ranges) and IP Prefix (subnet) allocations with manual and automatic reservations.
 #Example IP Prefix
 #https://registry.terraform.io/providers/vmware/vcd/latest/docs/resources/ip_space_ip_allocation#example-usage-floating-ip-usage-for-nat-rule
-
-resource "vcd_ip_space_ip_allocation" "ip-prefix" {
+// Allocate 2 dải mạng trong scope bằng prefix
+resource "vcd_ip_space_ip_allocation" "ip-prefix-192" {
   org_id        = data.vcd_org.org.id
-  ip_space_id   = vcd_ip_space.local-space.id
+  ip_space_id   = vcd_ip_space.local-space-dev.id
   type          = "IP_PREFIX"
   prefix_length = 24
 
-  depends_on = [vcd_ip_space.local-space]
+  depends_on = [vcd_ip_space.local-space-dev]
+}
+
+// Chỉ định allocated cho dải 10.
+// Trong TH cả 2 scope prefix đều /24 => allocate lần lượt từ nhỏ đến lớn, prefix nào tạo trước ưu tiên
+// => Không chỉ định được dải
+resource "vcd_ip_space_ip_allocation" "ip-prefix-10" {
+  org_id        = data.vcd_org.org.id
+  ip_space_id   = vcd_ip_space.local-space-dev.id
+  type          = "IP_PREFIX"
+  prefix_length = 30
+
+  depends_on = [vcd_ip_space.local-space-dev]
 }
 
 #Provides a VMware Cloud Director Org VDC routed Network. This can be used to create, modify, and delete routed VDC networks (backed by NSX-T or NSX-V).
@@ -113,13 +146,13 @@ resource "vcd_network_routed_v2" "routed-network" {
   org             = var.org_name
   name            = "terraform-routed-network"
   edge_gateway_id = data.vcd_nsxt_edgegateway.nsxt-edge.id
-  gateway         = cidrhost(vcd_ip_space_ip_allocation.ip-prefix.ip_address, 1)
-  prefix_length   = vcd_ip_space_ip_allocation.ip-prefix.prefix_length
+  gateway         = cidrhost(vcd_ip_space_ip_allocation.ip-prefix-192.ip_address, 1)
+  prefix_length   = vcd_ip_space_ip_allocation.ip-prefix-192.prefix_length
   #prefix_length   = split("/", vcd_ip_space_ip_allocation.ip-prefix.ip_address)[1]
 
   static_ip_pool {
-    start_address = cidrhost(vcd_ip_space_ip_allocation.ip-prefix.ip_address, 2)
-    end_address   = cidrhost(vcd_ip_space_ip_allocation.ip-prefix.ip_address, 253)
+    start_address = cidrhost(vcd_ip_space_ip_allocation.ip-prefix-192.ip_address, 2)
+    end_address   = cidrhost(vcd_ip_space_ip_allocation.ip-prefix-192.ip_address, 253)
   }
 }
 #Stop network NSX
@@ -172,7 +205,7 @@ resource "vcd_vapp_vm" "web-backend" {
     change_sid                 = true
     allow_local_admin_password = true
     auto_generate_password     = false
-    admin_password             = "passwd vm"
+    admin_password             = "Matkhaumoiroi1!"
   }
 
   depends_on = [vcd_vapp_org_network.routed-network]
