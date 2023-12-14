@@ -59,10 +59,38 @@ data "vcd_catalog_vapp_template" "atm-win2k16" {
   name       = "ATMA-Win2k16-Std"
 }
 
+data "vcd_org_vdc" "vdc-dev" {
+  name = "8001350-Dev"
+}
+
+data "vcd_org_vdc" "vdc-prod" {
+  name = "8001350-Prod"
+}
+
+data "vcd_org_vdc" "vdc-sharing" {
+  name = "8001350-Sharing"
+}
+
+data "vcd_org_vdc" "vdc-staging" {
+  name = "8001350-Staging"
+}
+
 # Data for NSXT Edgegateway
-data "vcd_nsxt_edgegateway" "nsxt-edge" {
+data "vcd_nsxt_edgegateway" "nsxt-edge-dev" {
   org         = var.org_name
   name        = var.edge_gateway
+  owner_id    = data.vcd_org_vdc.vdc-dev.id
+}
+
+data "vcd_vdc_group" "group" {
+  name = "8001350-Datacenter Group-01"
+}
+
+# Data for NSXT Edgegateway
+data "vcd_nsxt_edgegateway" "nsxt-edge-group" {
+  org      = var.org_name
+  owner_id = data.vcd_vdc_group.group.id
+  name     = "8001350-Edge Gateway"
 }
 
 # Data for Network Internet Space
@@ -145,16 +173,34 @@ resource "vcd_ip_space_ip_allocation" "ip-prefix-10" {
 resource "vcd_network_routed_v2" "routed-network" {
   org             = var.org_name
   name            = "terraform-routed-network"
-  edge_gateway_id = data.vcd_nsxt_edgegateway.nsxt-edge.id
-  gateway         = cidrhost(vcd_ip_space_ip_allocation.ip-prefix-192.ip_address, 1)
+  edge_gateway_id = data.vcd_nsxt_edgegateway.nsxt-edge-dev.id
+  gateway         = cidrhost(vcd_ip_space_ip_allocation.ip-prefix-192.ip_address, 253)
   prefix_length   = vcd_ip_space_ip_allocation.ip-prefix-192.prefix_length
   #prefix_length   = split("/", vcd_ip_space_ip_allocation.ip-prefix.ip_address)[1]
 
   static_ip_pool {
     start_address = cidrhost(vcd_ip_space_ip_allocation.ip-prefix-192.ip_address, 2)
-    end_address   = cidrhost(vcd_ip_space_ip_allocation.ip-prefix-192.ip_address, 253)
+    end_address   = cidrhost(vcd_ip_space_ip_allocation.ip-prefix-192.ip_address, 252)
   }
 }
+
+resource "vcd_network_isolated_v2" "isolated-network" {
+  org      = var.org_name
+  owner_id = data.vcd_org_vdc.vdc-dev.id
+
+  name        = "terraform-nsxt-isolated"
+  description = "My isolated Org VDC network backed by NSX-T. Use prefix 10."
+
+  gateway         = cidrhost(vcd_ip_space_ip_allocation.ip-prefix-10.ip_address, 2)
+  prefix_length   = vcd_ip_space_ip_allocation.ip-prefix-10.prefix_length
+  #prefix_length   = split("/", vcd_ip_space_ip_allocation.ip-prefix.ip_address)[1]
+
+  static_ip_pool {
+    start_address = cidrhost(vcd_ip_space_ip_allocation.ip-prefix-10.ip_address, 1)
+    end_address   = cidrhost(vcd_ip_space_ip_allocation.ip-prefix-10.ip_address, 1)
+  }
+}
+
 #Stop network NSX
 
 ## Org vApp - vapp-web
@@ -182,6 +228,7 @@ resource "vcd_vapp_org_network" "routed-network" {
 ## VM 01 - web-backend
 # Refer https://registry.terraform.io/providers/vmware/vcd/latest/docs/resources/vapp_vm
 resource "vcd_vapp_vm" "web-backend" {
+  //vdc       = var.vdc_name //data.vcd_org_vdc.vdc-dev.name Cần chỉ định VDC trong provider
   vapp_name = vcd_vapp.vapp-web.name
   name      = "web-backend"
 
@@ -200,6 +247,15 @@ resource "vcd_vapp_vm" "web-backend" {
     #ip_allocation_mode = "MANUAL"
   }
 
+  override_template_disk {
+    bus_type        = "paravirtual"
+    size_in_mb      = "30720"
+    bus_number      = 0
+    unit_number     = 0
+    iops            = 0
+    storage_profile = "vSAN Gold Storage Service"
+  }
+
   customization {
     force                      = false
     change_sid                 = true
@@ -211,13 +267,28 @@ resource "vcd_vapp_vm" "web-backend" {
   depends_on = [vcd_vapp_org_network.routed-network]
 }
 
+## add disk
+# https://registry.terraform.io/providers/vmware/vcd/latest/docs/resources/vm_internal_disk
+
+resource "vcd_vm_internal_disk" "disk2" {
+  vapp_name       = vcd_vapp.vapp-web.name
+  vm_name         = vcd_vapp_vm.web-backend.name
+  bus_type        = "sata"
+  size_in_mb      = "13333"
+  bus_number      = 0
+  unit_number     = 1
+  storage_profile = "vSAN Gold Storage Service"
+  allow_vm_reboot = true
+  depends_on      = [vcd_vapp_vm.web-backend]
+}
+
 #FW and NAT
 #https://registry.terraform.io/providers/vmware/vcd/latest/docs/resources/nsxt_firewall
 #Example rule to allow all IPv4 traffic from anywhere to anywhere)
 resource "vcd_nsxt_firewall" "internet-192-168-100-0" {
   org           = var.org_name
 
-  edge_gateway_id = data.vcd_nsxt_edgegateway.nsxt-edge.id
+  edge_gateway_id = data.vcd_nsxt_edgegateway.nsxt-edge-dev.id
 
   rule {
     action           = "ALLOW"
@@ -244,7 +315,7 @@ resource "vcd_ip_space_ip_allocation" "internet-ip" {
 resource "vcd_nsxt_nat_rule" "snat-web" {
   org = var.org_name
 
-  edge_gateway_id = data.vcd_nsxt_edgegateway.nsxt-edge.id
+  edge_gateway_id = data.vcd_nsxt_edgegateway.nsxt-edge-dev.id
 
   name        = "SNAT WEB"
   rule_type   = "SNAT" //One of DNAT, NO_DNAT, SNAT, NO_SNAT, REFLEXIVE
